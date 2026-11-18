@@ -139,7 +139,7 @@
         <label>API key (optional for keyless providers)<input id="provider-key" type="password" placeholder="API key" autocomplete="off"></label>
         <label>System prompt<input id="provider-system" type="text" value="You are a helpful assistant." autocomplete="off"></label>
       </div>
-      <div class="chat-actions"><button type="button" id="save-provider">Save provider settings</button><button type="button" class="secondary" id="clear-provider">Clear saved settings</button><label><input id="auto-voice" type="checkbox" checked> Generate a voice note for each reply</label></div>
+      <div class="chat-actions"><button type="button" id="save-provider">Save provider settings</button><button type="button" class="secondary" id="clear-provider">Clear saved settings</button><label><input id="auto-voice" type="checkbox" checked> Generate voice for each reply</label><label>Delivery <select id="voice-delivery" style="margin-left:5px;padding:6px;border:1px solid var(--line);border-radius:7px;background:var(--paper);color:var(--ink)"><option value="note">Attach voice note</option><option value="direct">Direct playback (stream as generated)</option></select></label><label><input id="auto-play-note" type="checkbox" checked> Auto-play voice notes</label></div>
       <p class="chat-note">Settings are saved in this browser only. Your API key is sent directly to the provider, not to this website. The provider must allow browser CORS requests.</p>
     </details>
     <div class="chat-log" id="chat-log" aria-live="polite"><div class="chat-msg assistant">Connect your provider, then send a message.</div></div>
@@ -277,7 +277,7 @@ worker.postMessage({ type: "load" });
 
 // OpenAI-compatible chat. Provider credentials stay in this browser and are never sent to this app's server.
 const chatLog = $("chat-log"), chatStatus = $("chat-status");
-let chatHistory = [], chatVoiceJobs = new Map();
+let chatHistory = [], chatVoiceJobs = new Map(), chatAudioContext = null;
 function chatMessage(role, text) {
   const el = document.createElement("div"); el.className = "chat-msg " + role; el.textContent = text;
   chatLog.append(el); chatLog.scrollTop = chatLog.scrollHeight; return el;
@@ -292,14 +292,34 @@ loadProviderSettings();
 function chatWav(samples, sampleRate) { return URL.createObjectURL(wav(samples,sampleRate)); }
 worker.addEventListener("message",({data})=>{
   if(!data || !chatVoiceJobs.has(data.id)) return;
-  if(data.type==="done") {
-    const job=chatVoiceJobs.get(data.id); chatVoiceJobs.delete(data.id);
-    const audio=document.createElement("audio"); audio.controls=true; audio.preload="none"; audio.src=chatWav(data.audio,data.sampleRate); audio.setAttribute("aria-label","AI reply voice note");
-    job.append(audio); chatStatus.textContent="Voice note ready.";
-  } else if(data.type==="error") { chatVoiceJobs.delete(data.id); chatStatus.textContent="Voice generation failed: "+data.message; }
+  const job=chatVoiceJobs.get(data.id);
+  if(data.type==="sentence" && job.mode==="direct" && data.audio && job.live) {
+    job.live.add(data.audio,data.sampleRate);
+    chatStatus.textContent="Playing reply…";
+  } else if(data.type==="done") {
+    chatVoiceJobs.delete(data.id);
+    if(job.mode==="direct") {
+      if(job.live) job.live.end();
+      chatStatus.textContent="Reply playback finished.";
+    } else {
+      const audio=document.createElement("audio"); audio.controls=true; audio.preload="auto"; audio.src=chatWav(data.audio,data.sampleRate); audio.setAttribute("aria-label","AI reply voice note");
+      job.append(audio);
+      if($("auto-play-note").checked) audio.play().then(()=>{chatStatus.textContent="Playing voice note…";}).catch(()=>{chatStatus.textContent="Voice note ready. Tap play if autoplay is blocked by your browser.";});
+      else chatStatus.textContent="Voice note ready.";
+    }
+  } else if(data.type==="error") {
+    chatVoiceJobs.delete(data.id); if(job.live) job.live.end();
+    chatStatus.textContent="Voice generation failed: "+data.message;
+  }
 });
 async function sendChat() {
   const text=$("chat-input").value.trim(); if(!text) return;
+  // Prime browser audio during the Send gesture, before the provider request.
+  if($("auto-voice").checked && $("voice-delivery").value==="direct") {
+    const Context=window.AudioContext||window.webkitAudioContext;
+    if(Context && !chatAudioContext) { try { chatAudioContext=new Context({sampleRate:rate||24000}); } catch(e) { try { chatAudioContext=new Context(); } catch(ignore) {} } }
+    if(chatAudioContext && chatAudioContext.state==="suspended") chatAudioContext.resume().catch(()=>{});
+  }
   const s=providerSettings();
   if(!s.url || !s.model) { chatStatus.textContent="Enter an API base URL and model first."; return; }
   chatMessage("user",text); $("chat-input").value=""; chatHistory.push({role:"user",content:text});
@@ -315,10 +335,18 @@ async function sendChat() {
     chatHistory.push({role:"assistant",content:reply});
     const message=chatMessage("assistant",reply);
     if($("auto-voice").checked) {
-      if(!ready) { chatStatus.textContent="Reply received, but tiny-voca is still loading. Wait for the TTS status to show Ready, then resend or use the TTS section."; }
+      if(!ready) { chatStatus.textContent="Reply received, but tiny-voca is still loading. Wait for TTS to show Ready."; }
       else {
         const id="chat-"+Date.now()+"-"+Math.random().toString(36).slice(2);
-        chatVoiceJobs.set(id,message); chatStatus.textContent="Generating voice note…";
+        const mode=$("voice-delivery").value;
+        let livePlayerInstance=null;
+        if(mode==="direct" && chatAudioContext) {
+          livePlayerInstance=livePlayer(chatAudioContext,()=>{});
+          livePlayerInstance.begin();
+          if(chatAudioContext.state==="suspended") chatAudioContext.resume().catch(()=>{});
+        }
+        chatVoiceJobs.set(id,{append:message,mode,live:livePlayerInstance});
+        chatStatus.textContent=mode==="direct"?"Generating and playing reply…":"Generating voice note…";
         worker.postMessage({type:"speak",id,text:reply,voice:Number(document.querySelector('input[name="voice"]:checked').value),speed:Number($("speed").value)});
       }
     } else chatStatus.textContent="Reply received.";
