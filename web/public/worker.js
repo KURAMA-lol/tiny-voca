@@ -157,19 +157,27 @@ function limitPeak(samples) {
 // Shown when no sentence of a text could be read. tiny_voca.infer.speak_text says the same.
 const ENGLISH_ONLY = "tiny-voca only reads English for now.";
 
+const cancelledJobs = new Set();
+let speechQueue = Promise.resolve();
+
 async function speak({ id, text, voice, speed }) {
+  try {
+  if (cancelledJobs.has(id)) return;
   const started = performance.now();
   const list = sentences(finished(text));
   const chunks = [];
   let phonemeTime = 0;
   let modelTime = 0;
   for (let index = 0; index < list.length; index++) {
+    if (cancelledJobs.has(id)) return;
     let mark = performance.now();
     const utterances = fit(list[index]);
     phonemeTime += performance.now() - mark;
     for (const phones of utterances) {
+      if (cancelledJobs.has(id)) return;
       mark = performance.now();
       const audio = await synthesize(phones, voice, speed);
+      if (cancelledJobs.has(id)) return;
       modelTime += performance.now() - mark;
       chunks.push(audio);
       // The page plays this sentence at once, before the whole clip is known: a copy, kept below full scale by itself.
@@ -179,6 +187,7 @@ async function speak({ id, text, voice, speed }) {
                     sampleRate: config.sample_rate }, [heard.buffer]);
     }
   }
+  if (cancelledJobs.has(id)) return;
   if (!chunks.length) {
     postMessage({ type: "error", id, message: ENGLISH_ONLY, plain: true });
     return;
@@ -188,17 +197,25 @@ async function speak({ id, text, voice, speed }) {
   let offset = 0;
   for (const chunk of chunks) { audio.set(chunk, offset); offset += chunk.length; }
   limitPeak(audio);
-  postMessage({ type: "done", id, audio, sampleRate: config.sample_rate, phonemeTime, modelTime,
+  if (!cancelledJobs.has(id)) postMessage({ type: "done", id, audio, sampleRate: config.sample_rate, phonemeTime, modelTime,
                 totalTime: performance.now() - started }, [audio.buffer]);
+  } finally { cancelledJobs.delete(id); }
 }
 
 onmessage = async ({ data }) => {
+  if (data.type === "cancel") {
+    cancelledJobs.add(data.id);
+    return;
+  }
   try {
     if (data.type === "load") {
       await Promise.all([loadPhonemizer(), loadModel()]);
       postMessage({ type: "ready", voices: config.voices, sampleRate: config.sample_rate });
     } else if (data.type === "speak") {
-      await speak(data);
+      speechQueue = speechQueue.then(() => speak(data)).catch(error => {
+        if (!cancelledJobs.has(data.id)) postMessage({ type: "error", id: data.id, message: String(error && error.message || error) });
+        cancelledJobs.delete(data.id);
+      });
     }
   } catch (error) {
     postMessage({ type: "error", id: data.id, message: String(error && error.message || error) });

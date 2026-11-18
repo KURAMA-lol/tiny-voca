@@ -339,12 +339,12 @@ worker.postMessage({ type: "load" });
 // OpenAI-compatible chat. Provider credentials stay in this browser and are never sent to this app's server.
 const chatLog = $("chat-log"), chatStatus = $("chat-status");
 let chatHistory = [], callHistory = [], chatVoiceJobs = new Map(), chatAudioContext = null, activeCallVoiceJob = null;
-let voiceCallActive=false, voiceCallMuted=false, voiceCallBusy=false, recognition=null, recognitionSupported=false;
+let voiceCallActive=false, voiceCallMuted=false, voiceCallBusy=false, recognition=null, recognitionSupported=false, recognitionStarting=false, callTurnId=0;
 // Suppress microphone recognition while assistant TTS is audible, then allow speaker echo to decay.
 let voiceOutputActive=false, voiceOutputCooldownUntil=0, voiceOutputReleaseTimer=null, listenRestartTimer=null;
 function setVoiceOutputActive(active,cooldown=900){if(voiceOutputReleaseTimer){clearTimeout(voiceOutputReleaseTimer);voiceOutputReleaseTimer=null;}voiceOutputActive=active;voiceOutputCooldownUntil=active?Number.POSITIVE_INFINITY:Date.now()+cooldown;}
 function scheduleListening(delay=250){if(listenRestartTimer)clearTimeout(listenRestartTimer);listenRestartTimer=setTimeout(()=>{listenRestartTimer=null;if(!voiceCallActive||voiceCallMuted||voiceCallBusy)return;if(voiceOutputActive||Date.now()<voiceOutputCooldownUntil){scheduleListening(250);return;}startListening();},delay);}
-function releaseVoiceOutputAfterPlayback(){if(voiceOutputReleaseTimer)clearTimeout(voiceOutputReleaseTimer);voiceOutputReleaseTimer=setTimeout(()=>{voiceOutputReleaseTimer=null;setVoiceOutputActive(false,900);if(voiceCallActive&&!voiceCallMuted&&!voiceCallBusy)scheduleListening(950);},250);}
+function releaseVoiceOutputAfterPlayback(){if(voiceOutputReleaseTimer)clearTimeout(voiceOutputReleaseTimer);voiceOutputReleaseTimer=setTimeout(()=>{voiceOutputReleaseTimer=null;setVoiceOutputActive(false,500);if(voiceCallActive&&!voiceCallMuted&&!voiceCallBusy)scheduleListening(550);},250);}
 function chatMessage(role, text) {
   const el = document.createElement("div"); el.className = "chat-msg " + role; el.textContent = text;
   chatLog.append(el); chatLog.scrollTop = chatLog.scrollHeight; return el;
@@ -441,25 +441,177 @@ $("chat-send").onclick=sendChat;
 $("chat-input").addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendChat();}});
 
 function callMessage(role,text){const el=document.createElement("div");el.className="chat-msg "+role;el.textContent=text;$("call-log").append(el);$("call-log").scrollTop=$("call-log").scrollHeight;return el;}
-async function sendCallMessage(raw){const text=String(raw||"").trim();if(!text||voiceCallBusy)return;voiceCallBusy=true;callMessage("user",text);$("call-input").value="";callHistory.push({role:"user",content:text});callStatus("Thinking…");const settings=providerSettings();try{if(!settings.url)throw new Error("Configure your AI endpoint in Provider settings first.");const messages=[{role:"system",content:settings.system||"You are a helpful assistant."},...callHistory.slice(-(settings.context||12))];const reply=await callAIEndpoint(settings,messages);callHistory.push({role:"assistant",content:reply});const bubble=callMessage("assistant",reply);if(!ready)throw new Error("Tiny-Voca is still loading; wait until it shows Ready.");const Context=window.AudioContext||window.webkitAudioContext;if(Context&&!chatAudioContext){try{chatAudioContext=new Context({sampleRate:rate||24000});}catch(e){chatAudioContext=new Context();}}if(chatAudioContext&&chatAudioContext.state==="suspended")await chatAudioContext.resume().catch(()=>{});const id="call-"+Date.now()+"-"+Math.random().toString(36).slice(2);const player=livePlayer(chatAudioContext,()=>{if(activeCallVoiceJob&&activeCallVoiceJob.id===id&&!activeCallVoiceJob.live.playing)finishVoiceTurn();});player.begin();activeCallVoiceJob={id,live:player,reply};chatVoiceJobs.set(id,{append:bubble,mode:"direct",live:player,onFinished:finishVoiceTurn,statusNode:callState});voiceCallBusy=false;setVoiceOutputActive(true);callStatus("Hina is replying. You can speak to interrupt.");startListening();worker.postMessage({type:"speak",id,text:reply,voice:Number($("call-voice-choice").value),speed:Number($("speed").value)});}catch(error){callMessage("assistant","I couldn't complete that turn: "+error.message);finishVoiceTurn();}}
-$("call-send").onclick=()=>sendCallMessage($("call-input").value);$("call-input").addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendCallMessage($("call-input").value);}});
+async function sendCallMessage(raw){
+  const text=String(raw||"").trim();
+  if(!text||voiceCallBusy)return;
+  voiceCallBusy=true;
+  const turn=++callTurnId;
+  if(callSilenceTimer){clearTimeout(callSilenceTimer);callSilenceTimer=null;}
+  if(callRestartTimer){clearTimeout(callRestartTimer);callRestartTimer=null;}
+  pendingCallText="";
+  if(activeCallVoiceJob)interruptCallAudio("You interrupted.");
+  if(recognition){try{recognition.abort();}catch(e){}}
+  callMessage("user",text);$("call-input").value="";callHistory.push({role:"user",content:text});callStatus("Thinking…");
+  const settings=providerSettings();
+  try{
+    if(!settings.url)throw new Error("Configure your AI endpoint in Provider settings first.");
+    const messages=[{role:"system",content:settings.system||"You are a helpful assistant."},...callHistory.slice(-(settings.context||12))];
+    const reply=await callAIEndpoint(settings,messages);
+    if(turn!==callTurnId)return;
+    callHistory.push({role:"assistant",content:reply});
+    const bubble=callMessage("assistant",reply);
+    if(!ready)throw new Error("Tiny-Voca is still loading; wait until it shows Ready.");
+    const Context=window.AudioContext||window.webkitAudioContext;
+    if(Context&&!chatAudioContext){try{chatAudioContext=new Context({sampleRate:rate||24000});}catch(e){chatAudioContext=new Context();}}
+    if(!chatAudioContext)throw new Error("This browser does not support audio playback.");
+    if(chatAudioContext.state==="suspended")await chatAudioContext.resume().catch(()=>{});
+    if(turn!==callTurnId)return;
+    const id="call-"+Date.now()+"-"+Math.random().toString(36).slice(2);
+    const player=livePlayer(chatAudioContext,()=>{if(activeCallVoiceJob&&activeCallVoiceJob.id===id&&!activeCallVoiceJob.live.playing)finishVoiceTurn(id);});
+    player.begin();
+    activeCallVoiceJob={id,live:player,reply};
+    chatVoiceJobs.set(id,{append:bubble,mode:"direct",live:player,onFinished:()=>finishVoiceTurn(id),statusNode:callState});
+    voiceCallBusy=false;
+    setVoiceOutputActive(true);
+    callStatus("Hina is replying. You can interrupt at any time.");
+    startListening();
+    worker.postMessage({type:"speak",id,text:reply,voice:Number($("call-voice-choice").value),speed:Number($("speed").value)});
+  }catch(error){
+    if(turn!==callTurnId)return;
+    callMessage("assistant","I couldn't complete that turn: "+error.message);
+    finishVoiceTurn();
+  }
+}
+$("call-send").onclick=()=>sendCallMessage($("call-input").value);
+$("call-input").addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendCallMessage($("call-input").value);}});
 function normalizeVoiceText(v){return String(v||"").toLowerCase().replace(/[^a-z0-9\s]/g," ").replace(/\s+/g," ").trim();}
-function likelyEcho(v){if(!activeCallVoiceJob)return false;const heard=normalizeVoiceText(v).split(" ").filter(Boolean),said=normalizeVoiceText(activeCallVoiceJob.reply).split(" ").filter(Boolean);if(heard.length<3||!said.length)return false;const set=new Set(said);const overlap=heard.filter(w=>set.has(w)).length/heard.length;return overlap>=0.58;}
+function likelyEcho(v){
+  if(!activeCallVoiceJob)return false;
+  const heard=normalizeVoiceText(v).split(" ").filter(Boolean);
+  const said=normalizeVoiceText(activeCallVoiceJob.reply).split(" ").filter(Boolean);
+  if(!heard.length||!said.length)return false;
+  const phrase=heard.join(" "), response=said.join(" ");
+  if(response.includes(phrase))return true;
+  const ignored=new Set(["a","an","the","and","or","but","to","of","in","on","at","for","is","it","i","you","we","they","he","she","that","this","so","do","are","was","be","have","has","had","me","my","your"]);
+  const meaningful=heard.filter(w=>!ignored.has(w));
+  if(meaningful.length<3)return false;
+  const saidSet=new Set(said);
+  const overlap=meaningful.filter(w=>saidSet.has(w)).length/meaningful.length;
+  return overlap>=0.84;
+}
+function shouldInterrupt(text,confidence){
+  const normalized=normalizeVoiceText(text);
+  if(!normalized||likelyEcho(normalized))return false;
+  const words=normalized.split(" ").filter(Boolean);
+  if(/^(stop|wait|hold on|hang on|one second|just a second|excuse me|let me speak|hey hina)$/.test(normalized))return true;
+  if(words.length>=2)return true;
+  return words.length===1&&Number(confidence)>=0.82;
+}
+function interruptCallAudio(status="You interrupted. Listening…"){
+  const interrupted=activeCallVoiceJob;
+  if(!interrupted)return false;
+  activeCallVoiceJob=null;
+  chatVoiceJobs.delete(interrupted.id);
+  try{worker.postMessage({type:"cancel",id:interrupted.id});}catch(e){}
+  try{interrupted.live.stop();}catch(e){}
+  setVoiceOutputActive(false,500);
+  callStatus(status);
+  return true;
+}
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 recognitionSupported = !!SpeechRecognition;
 const callState=$("call-state"), callTranscript=$("call-transcript"), callStart=$("call-start"), callMute=$("call-mute"), callEnd=$("call-end");
 let pendingCallText="", callSilenceTimer=null, callRestartTimer=null;
 function callStatus(message, active=voiceCallActive){callState.innerHTML='<span class="call-live '+(active?'active':'')+'"></span>'+message;}
-function scheduleCallListening(delay=250){if(callRestartTimer)clearTimeout(callRestartTimer);callRestartTimer=setTimeout(()=>{callRestartTimer=null;if(voiceCallActive&&!voiceCallMuted&&!voiceCallBusy)startListening();},delay);}
-function commitCallSpeech(){if(callSilenceTimer)clearTimeout(callSilenceTimer);callSilenceTimer=null;const text=pendingCallText.trim();pendingCallText="";if(text&&voiceCallActive&&!voiceCallMuted)sendCallMessage(text);}
-function makeRecognition(){if(!recognitionSupported)return null;const r=new SpeechRecognition();r.lang=$("call-language").value;r.continuous=false;r.interimResults=true;r.maxAlternatives=1;r.onresult=(event)=>{let interim="",finalText="";for(let i=event.resultIndex;i<event.results.length;i++){const phrase=event.results[i][0].transcript;if(event.results[i].isFinal)finalText+=phrase;else interim+=phrase;}const heard=(finalText||interim).trim();if(heard){callTranscript.textContent=heard;if(voiceOutputActive&&activeCallVoiceJob&&heard.split(/\s+/).length>=3&&!likelyEcho(heard)){const interrupted=activeCallVoiceJob;interrupted.live.stop();chatVoiceJobs.delete(interrupted.id);activeCallVoiceJob=null;setVoiceOutputActive(false,250);callStatus("You interrupted. Listening…");}if(finalText.trim()&&!likelyEcho(finalText)){pendingCallText+=(pendingCallText?" ":"")+finalText.trim();if(callSilenceTimer)clearTimeout(callSilenceTimer);callSilenceTimer=setTimeout(commitCallSpeech,850);}}};r.onerror=(event)=>{if(event.error==="not-allowed"||event.error==="service-not-allowed"){callStatus("Microphone permission denied. Allow microphone access in your browser.",false);stopVoiceCall();}else if(event.error!=="no-speech"&&event.error!=="aborted")callStatus("Speech recognition error: "+event.error);};r.onend=()=>{if(voiceCallActive&&!voiceCallMuted&&!voiceCallBusy)scheduleCallListening(250);};return r;}
-function startListening(){if(!voiceCallActive||voiceCallMuted||voiceCallBusy)return;try{recognition=makeRecognition();if(!recognition)return;recognition.start();callStatus(voiceOutputActive?"Listening for interruptions…":"Listening… Speak naturally.");}catch(error){scheduleCallListening(350);}}
-function finishVoiceTurn(){voiceCallBusy=false;activeCallVoiceJob=null;if(voiceCallActive&&!voiceCallMuted){callStatus("Your turn. Keep talking or pause when you're finished.");scheduleCallListening(900);}}
-function stopVoiceCall(){voiceCallActive=false;voiceCallBusy=false;voiceCallMuted=false;pendingCallText="";if(callSilenceTimer)clearTimeout(callSilenceTimer);if(callRestartTimer)clearTimeout(callRestartTimer);if(listenRestartTimer){clearTimeout(listenRestartTimer);listenRestartTimer=null;}if(voiceOutputReleaseTimer){clearTimeout(voiceOutputReleaseTimer);voiceOutputReleaseTimer=null;}if(activeCallVoiceJob){activeCallVoiceJob.live.stop();chatVoiceJobs.delete(activeCallVoiceJob.id);activeCallVoiceJob=null;}voiceOutputActive=false;voiceOutputCooldownUntil=0;try{if(recognition)recognition.abort();}catch(e){}callStart.disabled=!recognitionSupported||!ready;callMute.disabled=true;callEnd.disabled=true;callMute.textContent="Mute mic";callStatus("Call ended.",false);}
-callStart.disabled=!recognitionSupported||!ready;if(!recognitionSupported)callStatus("This browser does not support Web Speech recognition. Try Chrome on Android or desktop Chrome.",false);
-callStart.onclick=()=>{const settings=providerSettings();if(!settings.url||(settings.type==="openai"&&!settings.model)){callStatus("Configure a valid endpoint and model in Provider settings first.",false);return;}if(!ready){callStatus("Wait until Tiny-Voca shows Ready.",false);return;}voiceCallActive=true;voiceCallMuted=false;voiceCallBusy=false;callStart.disabled=true;callMute.disabled=false;callEnd.disabled=false;callStatus("Starting call…");const Context=window.AudioContext||window.webkitAudioContext;if(Context&&!chatAudioContext){try{chatAudioContext=new Context({sampleRate:rate||24000});}catch(e){chatAudioContext=new Context();}}if(chatAudioContext&&chatAudioContext.state==="suspended")chatAudioContext.resume().catch(()=>{});startListening();};
-callMute.onclick=()=>{voiceCallMuted=!voiceCallMuted;if(voiceCallMuted){try{if(recognition)recognition.abort();}catch(e){}callMute.textContent="Unmute mic";callStatus("Microphone muted.");}else{callMute.textContent="Mute mic";startListening();}};
-callEnd.onclick=stopVoiceCall;$("call-language").onchange=()=>{if(voiceCallActive&&!voiceCallMuted&&!voiceCallBusy){try{if(recognition)recognition.abort();}catch(e){}scheduleCallListening(150);}};
+function scheduleCallListening(delay=250){
+  if(callRestartTimer)clearTimeout(callRestartTimer);
+  callRestartTimer=setTimeout(()=>{callRestartTimer=null;if(voiceCallActive&&!voiceCallMuted&&!voiceCallBusy)startListening();},delay);
+}
+function commitCallSpeech(){
+  if(callSilenceTimer){clearTimeout(callSilenceTimer);callSilenceTimer=null;}
+  const text=pendingCallText.trim();pendingCallText="";
+  if(text&&voiceCallActive&&!voiceCallMuted)sendCallMessage(text);
+}
+function makeRecognition(){
+  if(!recognitionSupported)return null;
+  const r=new SpeechRecognition();
+  r.lang=$("call-language").value;r.continuous=false;r.interimResults=true;r.maxAlternatives=1;
+  r.onstart=()=>{recognitionStarting=false;if(voiceCallActive&&!voiceCallMuted)callStatus(activeCallVoiceJob?"Listening for interruptions…":"Listening… Speak naturally.");};
+  r.onresult=(event)=>{
+    let interim="",finalText="",confidence=0;
+    for(let i=event.resultIndex;i<event.results.length;i++){
+      const result=event.results[i],alternative=result[0],phrase=alternative.transcript;
+      confidence=Math.max(confidence,Number(alternative.confidence)||0);
+      if(result.isFinal)finalText+=phrase;else interim+=phrase;
+    }
+    const heard=(finalText||interim).trim();
+    if(heard){
+      callTranscript.textContent=heard;
+      if(activeCallVoiceJob&&activeCallVoiceJob.live.playing&&shouldInterrupt(heard,confidence))interruptCallAudio("You interrupted. Listening…");
+    }
+    if(finalText.trim()&&!likelyEcho(finalText)){
+      pendingCallText+=(pendingCallText?" ":"")+finalText.trim();
+      if(callSilenceTimer)clearTimeout(callSilenceTimer);
+      callSilenceTimer=setTimeout(commitCallSpeech,650);
+    }
+  };
+  r.onerror=(event)=>{
+    if(event.error==="not-allowed"||event.error==="service-not-allowed"){
+      callStatus("Microphone permission denied. Allow microphone access in your browser.",false);stopVoiceCall();
+    }else if(event.error!=="no-speech"&&event.error!=="aborted"&&voiceCallActive)callStatus("Speech recognition error: "+event.error);
+  };
+  r.onend=()=>{
+    if(recognition===r)recognition=null;
+    recognitionStarting=false;
+    if(voiceCallActive&&!voiceCallMuted&&!voiceCallBusy)scheduleCallListening(220);
+  };
+  return r;
+}
+function startListening(){
+  if(!voiceCallActive||voiceCallMuted||voiceCallBusy||recognition||recognitionStarting)return;
+  if(!activeCallVoiceJob&&Date.now()<voiceOutputCooldownUntil){scheduleCallListening(Math.max(120,Math.min(300,voiceOutputCooldownUntil-Date.now())));return;}
+  try{
+    const next=makeRecognition();if(!next)return;
+    recognition=next;recognitionStarting=true;next.start();
+  }catch(error){recognition=null;recognitionStarting=false;scheduleCallListening(400);}
+}
+function finishVoiceTurn(id){
+  if(id&&(!activeCallVoiceJob||activeCallVoiceJob.id!==id))return;
+  activeCallVoiceJob=null;voiceCallBusy=false;setVoiceOutputActive(false,500);
+  if(voiceCallActive&&!voiceCallMuted){callStatus("Your turn. Keep talking or pause when you're finished.");scheduleCallListening(250);}
+}
+function stopVoiceCall(){
+  voiceCallActive=false;voiceCallBusy=false;voiceCallMuted=false;callTurnId++;
+  pendingCallText="";
+  if(callSilenceTimer){clearTimeout(callSilenceTimer);callSilenceTimer=null;}
+  if(callRestartTimer){clearTimeout(callRestartTimer);callRestartTimer=null;}
+  if(listenRestartTimer){clearTimeout(listenRestartTimer);listenRestartTimer=null;}
+  if(voiceOutputReleaseTimer){clearTimeout(voiceOutputReleaseTimer);voiceOutputReleaseTimer=null;}
+  if(activeCallVoiceJob)interruptCallAudio("Call ended.");
+  activeCallVoiceJob=null;voiceOutputActive=false;voiceOutputCooldownUntil=0;
+  const current=recognition;recognition=null;recognitionStarting=false;
+  try{if(current)current.abort();}catch(e){}
+  callStart.disabled=!recognitionSupported||!ready;callMute.disabled=true;callEnd.disabled=true;callMute.textContent="Mute mic";callStatus("Call ended.",false);
+}
+callStart.disabled=!recognitionSupported||!ready;
+if(!recognitionSupported)callStatus("This browser does not support Web Speech recognition. Try Chrome on Android or desktop Chrome.",false);
+callStart.onclick=()=>{
+  const settings=providerSettings();
+  if(!settings.url||(settings.type==="openai"&&!settings.model)){callStatus("Configure a valid endpoint and model in Provider settings first.",false);return;}
+  if(!ready){callStatus("Wait until Tiny-Voca shows Ready.",false);return;}
+  voiceCallActive=true;voiceCallMuted=false;voiceCallBusy=false;callStart.disabled=true;callMute.disabled=false;callEnd.disabled=false;callStatus("Starting call…");
+  const Context=window.AudioContext||window.webkitAudioContext;
+  if(Context&&!chatAudioContext){try{chatAudioContext=new Context({sampleRate:rate||24000});}catch(e){chatAudioContext=new Context();}}
+  if(chatAudioContext&&chatAudioContext.state==="suspended")chatAudioContext.resume().catch(()=>{});
+  startListening();
+};
+callMute.onclick=()=>{
+  voiceCallMuted=!voiceCallMuted;
+  if(voiceCallMuted){if(callSilenceTimer){clearTimeout(callSilenceTimer);callSilenceTimer=null;}pendingCallText="";const current=recognition;recognition=null;recognitionStarting=false;try{if(current)current.abort();}catch(e){}callMute.textContent="Unmute mic";callStatus("Microphone muted.");}
+  else{callMute.textContent="Mute mic";startListening();}
+};
+callEnd.onclick=stopVoiceCall;
+$("call-language").onchange=()=>{if(voiceCallActive&&!voiceCallMuted&&!voiceCallBusy){const current=recognition;recognition=null;recognitionStarting=false;try{if(current)current.abort();}catch(e){}scheduleCallListening(180);}};
 </script>
 </body>
 </html>
