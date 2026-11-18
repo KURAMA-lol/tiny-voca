@@ -90,6 +90,17 @@
   #chat-status { color:var(--muted); font-size:13px; margin-top:9px; min-height:20px; }
   @media(max-width:560px){ .provider-grid{grid-template-columns:1fr} .chat-compose{flex-direction:column} .chat-compose button{min-height:44px} }
 
+  .call-panel { margin-top:24px; border:1px solid var(--line); border-radius:14px; padding:18px; background:var(--panel); }
+  .call-panel h2 { margin:0 0 6px; font:600 25px var(--sans); }
+  .call-controls { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-top:14px; }
+  .call-controls button { border:0; border-radius:9px; padding:12px 18px; background:var(--accent); color:var(--accent-ink); font-weight:650; cursor:pointer; }
+  .call-controls button.secondary { background:transparent; color:var(--ink); border:1px solid var(--line); }
+  .call-controls button:disabled { opacity:.45; cursor:default; }
+  #call-state { margin-top:12px; font-size:14px; color:var(--muted); min-height:22px; }
+  #call-transcript { margin-top:10px; padding:12px; border:1px solid var(--line); border-radius:9px; min-height:64px; color:var(--muted); white-space:pre-wrap; }
+  .call-live { display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--line); margin-right:7px; }
+  .call-live.active { background:#2f9b52; box-shadow:0 0 0 4px #2f9b5222; }
+
 </style>
 </head>
 <body>
@@ -145,6 +156,24 @@
     <div class="chat-log" id="chat-log" aria-live="polite"><div class="chat-msg assistant">Connect your provider, then send a message.</div></div>
     <div class="chat-compose"><textarea id="chat-input" placeholder="Write a message…" aria-label="Message"></textarea><button type="button" id="chat-send">Send</button></div>
     <div id="chat-status" role="status"></div>
+  </section>
+
+
+  <section class="call-panel" id="voice-call">
+    <h2>Voice call</h2>
+    <p class="chat-note">Talk naturally. Your browser transcribes your speech, sends it to your configured AI provider, then reads the answer aloud and listens again.</p>
+    <div class="call-controls">
+      <button type="button" id="call-start" disabled>Start voice call</button>
+      <button type="button" id="call-mute" class="secondary" disabled>Mute microphone</button>
+      <button type="button" id="call-end" class="secondary" disabled>End call</button>
+      <label class="chat-note" style="margin:0">Recognition language
+        <select id="call-language" style="margin-left:5px;padding:7px;border:1px solid var(--line);border-radius:7px;background:var(--paper);color:var(--ink)">
+          <option value="en-IN" selected>English (India)</option><option value="en-US">English (US)</option><option value="en-GB">English (UK)</option><option value="hi-IN">Hindi (India)</option>
+        </select>
+      </label>
+    </div>
+    <div id="call-state" role="status"><span class="call-live"></span>Voice call is off. Configure your provider above and wait for Tiny-Voca to show Ready.</div>
+    <div id="call-transcript" aria-live="polite">Your recognized speech will appear here.</div>
   </section>
 
   <section class="facts">
@@ -278,6 +307,7 @@ worker.postMessage({ type: "load" });
 // OpenAI-compatible chat. Provider credentials stay in this browser and are never sent to this app's server.
 const chatLog = $("chat-log"), chatStatus = $("chat-status");
 let chatHistory = [], chatVoiceJobs = new Map(), chatAudioContext = null;
+let voiceCallActive=false, voiceCallMuted=false, voiceCallBusy=false, recognition=null, recognitionSupported=false;
 function chatMessage(role, text) {
   const el = document.createElement("div"); el.className = "chat-msg " + role; el.textContent = text;
   chatLog.append(el); chatLog.scrollTop = chatLog.scrollHeight; return el;
@@ -301,15 +331,18 @@ worker.addEventListener("message",({data})=>{
     if(job.mode==="direct") {
       if(job.live) job.live.end();
       chatStatus.textContent="Reply playback finished.";
+      if(job.onFinished) job.onFinished();
     } else {
       const audio=document.createElement("audio"); audio.controls=true; audio.preload="auto"; audio.src=chatWav(data.audio,data.sampleRate); audio.setAttribute("aria-label","AI reply voice note");
       job.append(audio);
       if($("auto-play-note").checked) audio.play().then(()=>{chatStatus.textContent="Playing voice note…";}).catch(()=>{chatStatus.textContent="Voice note ready. Tap play if autoplay is blocked by your browser.";});
       else chatStatus.textContent="Voice note ready.";
+      if(job.onFinished) job.onFinished();
     }
   } else if(data.type==="error") {
     chatVoiceJobs.delete(data.id); if(job.live) job.live.end();
     chatStatus.textContent="Voice generation failed: "+data.message;
+    if(job.onFinished) job.onFinished();
   }
 });
 async function sendChat() {
@@ -321,7 +354,7 @@ async function sendChat() {
     if(chatAudioContext && chatAudioContext.state==="suspended") chatAudioContext.resume().catch(()=>{});
   }
   const s=providerSettings();
-  if(!s.url || !s.model) { chatStatus.textContent="Enter an API base URL and model first."; return; }
+  if(!s.url || !s.model) { chatStatus.textContent="Enter an API base URL and model first."; if(voiceCallActive) finishVoiceTurn(); return; }
   chatMessage("user",text); $("chat-input").value=""; chatHistory.push({role:"user",content:text});
   $("chat-send").disabled=true; chatStatus.textContent="Waiting for provider…";
   try {
@@ -335,26 +368,53 @@ async function sendChat() {
     chatHistory.push({role:"assistant",content:reply});
     const message=chatMessage("assistant",reply);
     if($("auto-voice").checked) {
-      if(!ready) { chatStatus.textContent="Reply received, but tiny-voca is still loading. Wait for TTS to show Ready."; }
+      if(!ready) { chatStatus.textContent="Reply received, but tiny-voca is still loading. Wait for TTS to show Ready."; if(voiceCallActive) finishVoiceTurn(); }
       else {
         const id="chat-"+Date.now()+"-"+Math.random().toString(36).slice(2);
-        const mode=$("voice-delivery").value;
+        const mode=voiceCallActive?"direct":$("voice-delivery").value;
         let livePlayerInstance=null;
         if(mode==="direct" && chatAudioContext) {
           livePlayerInstance=livePlayer(chatAudioContext,()=>{});
           livePlayerInstance.begin();
           if(chatAudioContext.state==="suspended") chatAudioContext.resume().catch(()=>{});
         }
-        chatVoiceJobs.set(id,{append:message,mode,live:livePlayerInstance});
+        chatVoiceJobs.set(id,{append:message,mode,live:livePlayerInstance,onFinished:voiceCallActive?finishVoiceTurn:null});
         chatStatus.textContent=mode==="direct"?"Generating and playing reply…":"Generating voice note…";
         worker.postMessage({type:"speak",id,text:reply,voice:Number(document.querySelector('input[name="voice"]:checked').value),speed:Number($("speed").value)});
       }
     } else chatStatus.textContent="Reply received.";
-  } catch(error) { chatStatus.textContent="Chat error: "+error.message+". Check the base URL, model, key, and provider CORS settings."; }
+  } catch(error) { chatStatus.textContent="Chat error: "+error.message+". Check the base URL, model, key, and provider CORS settings."; if(voiceCallActive) finishVoiceTurn(); }
   finally { $("chat-send").disabled=false; }
 }
 $("chat-send").onclick=sendChat;
 $("chat-input").addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendChat();}});
+
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+recognitionSupported = !!SpeechRecognition;
+const callState=$("call-state"), callTranscript=$("call-transcript"), callStart=$("call-start"), callMute=$("call-mute"), callEnd=$("call-end");
+function callStatus(message, active=voiceCallActive) { callState.innerHTML='<span class="call-live '+(active?'active':'')+'"></span>'+message; }
+function makeRecognition() {
+  if(!recognitionSupported) return null;
+  const r=new SpeechRecognition(); r.lang=$("call-language").value; r.continuous=false; r.interimResults=true; r.maxAlternatives=1;
+  r.onresult=(event)=>{
+    let interim="", finalText="";
+    for(let i=event.resultIndex;i<event.results.length;i++){const phrase=event.results[i][0].transcript;if(event.results[i].isFinal)finalText+=phrase;else interim+=phrase;}
+    callTranscript.textContent=finalText||interim||"Listening…";
+    if(finalText.trim()&&voiceCallActive&&!voiceCallMuted){voiceCallBusy=true;try{r.stop();}catch(e){} $("chat-input").value=finalText.trim();chatStatus.textContent="Recognized: "+finalText.trim();sendChat();}
+  };
+  r.onerror=(event)=>{if(event.error==="not-allowed"||event.error==="service-not-allowed"){callStatus("Microphone permission denied. Allow microphone access in your browser.",false);stopVoiceCall();}else if(event.error!=="no-speech"&&event.error!=="aborted")callStatus("Speech recognition error: "+event.error);};
+  r.onend=()=>{if(voiceCallActive&&!voiceCallMuted&&!voiceCallBusy)setTimeout(()=>startListening(),350);};
+  return r;
+}
+function startListening(){if(!voiceCallActive||voiceCallMuted||voiceCallBusy)return;try{recognition=makeRecognition();if(!recognition)return;recognition.start();callStatus("Listening… Speak naturally.");}catch(error){callStatus("Could not start microphone: "+error.message);}}
+function finishVoiceTurn(){voiceCallBusy=false;if(voiceCallActive&&!voiceCallMuted){callStatus("Reply finished. Listening again…");setTimeout(()=>startListening(),500);}}
+function stopVoiceCall(){voiceCallActive=false;voiceCallBusy=false;voiceCallMuted=false;try{if(recognition)recognition.abort();}catch(e){}callStart.disabled=!recognitionSupported||!ready;callMute.disabled=true;callEnd.disabled=true;callMute.textContent="Mute microphone";callStatus("Voice call ended.",false);}
+callStart.disabled=!recognitionSupported||!ready;
+if(!recognitionSupported)callStatus("This browser does not support Web Speech recognition. Try Chrome on Android or desktop Chrome.",false);
+callStart.onclick=()=>{const settings=providerSettings();if(!settings.url||!settings.model){callStatus("Set your provider URL and model in Provider settings first.",false);return;}if(!ready){callStatus("Wait until Tiny-Voca shows Ready.",false);return;}voiceCallActive=true;voiceCallMuted=false;voiceCallBusy=false;callStart.disabled=true;callMute.disabled=false;callEnd.disabled=false;$("auto-voice").checked=true;callStatus("Starting voice call…");const Context=window.AudioContext||window.webkitAudioContext;if(Context&&!chatAudioContext){try{chatAudioContext=new Context({sampleRate:rate||24000});}catch(e){try{chatAudioContext=new Context();}catch(ignore){}}}if(chatAudioContext&&chatAudioContext.state==="suspended")chatAudioContext.resume().catch(()=>{});startListening();};
+callMute.onclick=()=>{voiceCallMuted=!voiceCallMuted;if(voiceCallMuted){try{if(recognition)recognition.abort();}catch(e){}callMute.textContent="Unmute microphone";callStatus("Microphone muted. Tap unmute to continue.");}else{callMute.textContent="Mute microphone";startListening();}};
+callEnd.onclick=stopVoiceCall;
+$("call-language").onchange=()=>{if(voiceCallActive&&!voiceCallBusy&&!voiceCallMuted){try{if(recognition)recognition.abort();}catch(e){}startListening();}};
 
 </script>
 </body>
