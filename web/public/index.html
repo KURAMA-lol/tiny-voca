@@ -141,23 +141,27 @@
 
   <section class="chat-panel" id="ai-chat">
     <h2>AI voice chat</h2>
-    <p class="chat-note">Prexzy AI Writer is selected by default. You can switch to a custom OpenAI-compatible endpoint if needed. Replies are converted to Tiny-Voca voice locally in this browser.</p>
+    <p class="chat-note">Save multiple AI endpoints and switch between Prexzy-style prompt APIs and OpenAI-compatible chat-completions APIs. Replies are converted to Tiny-Voca voice locally in this browser.</p>
     <details open>
-      <summary>Provider settings</summary>
-      <label>AI provider
-        <select id="provider-mode" style="margin-top:6px;padding:9px;border:1px solid var(--line);border-radius:7px;background:var(--paper);color:var(--ink);width:100%">
-          <option value="prexzy" selected>Prexzy AI Writer (built-in default · no API key)</option>
-          <option value="custom">Custom OpenAI-compatible provider</option>
-        </select>
-      </label>
-      <div class="provider-grid" id="custom-provider-fields" hidden>
-        <label>API base URL<input id="provider-url" type="url" placeholder="https://api.openai.com/v1" autocomplete="url"></label>
-        <label>Model<input id="provider-model" type="text" placeholder="gpt-4o-mini" autocomplete="off"></label>
-        <label>API key (optional for keyless providers)<input id="provider-key" type="password" placeholder="API key" autocomplete="off"></label>
+      <summary>AI provider & endpoints</summary>
+      <div class="provider-grid">
+        <label>Saved endpoint<select id="endpoint-select" style="margin-top:6px;padding:9px;border:1px solid var(--line);border-radius:7px;background:var(--paper);color:var(--ink);width:100%"></select></label>
+        <label>Endpoint name<input id="endpoint-name" type="text" placeholder="My AI endpoint" autocomplete="off"></label>
+        <label>Request format<select id="endpoint-type"><option value="prexzy">Prexzy-style (prompt endpoint)</option><option value="openai">OpenAI-compatible (/chat/completions)</option></select></label>
+        <label>Endpoint URL<input id="endpoint-url" type="url" placeholder="https://example.com/ai/chat" autocomplete="url"></label>
+        <label id="endpoint-method-wrap">HTTP method<select id="endpoint-method"><option value="GET">GET (query parameters)</option><option value="POST">POST (JSON body)</option></select></label>
+        <label id="endpoint-prompt-wrap">Prompt parameter<input id="endpoint-prompt-param" type="text" value="prompt" placeholder="prompt"></label>
+        <label id="endpoint-model-param-wrap">Model parameter<input id="endpoint-model-param" type="text" value="model" placeholder="model"></label>
+        <label>Model (optional for prompt endpoints)<input id="endpoint-model" type="text" placeholder="gpt-4o-mini" autocomplete="off"></label>
+        <label>API key (optional)<input id="endpoint-key" type="password" placeholder="API key" autocomplete="off"></label>
+        <label>API key header<select id="endpoint-auth"><option value="bearer">Authorization: Bearer</option><option value="x-api-key">x-api-key</option></select></label>
+        <label>Request timeout (seconds)<input id="endpoint-timeout" type="number" min="10" max="180" value="90"></label>
+        <label>Context messages<input id="endpoint-context" type="number" min="2" max="40" value="12"></label>
       </div>
       <label>System prompt<input id="provider-system" type="text" value="You are a helpful assistant." autocomplete="off"></label>
-      <div class="chat-actions"><button type="button" id="save-provider">Save provider settings</button><button type="button" class="secondary" id="clear-provider">Clear saved settings</button><label><input id="auto-voice" type="checkbox" checked> Generate voice for each reply</label><label>Delivery <select id="voice-delivery" style="margin-left:5px;padding:6px;border:1px solid var(--line);border-radius:7px;background:var(--paper);color:var(--ink)"><option value="note">Attach voice note</option><option value="direct">Direct playback (stream as generated)</option></select></label><label><input id="auto-play-note" type="checkbox" checked> Auto-play voice notes</label></div>
-      <p class="chat-note">Settings are saved in this browser only. Prexzy needs no API key. If you switch to a custom provider, its API key is sent directly from this browser. Both providers must allow browser CORS requests.</p>
+      <div class="chat-actions"><button type="button" id="save-provider">Save / update endpoint</button><button type="button" class="secondary" id="add-provider">Save as new endpoint</button><button type="button" class="secondary" id="test-provider">Test endpoint</button><button type="button" class="secondary" id="delete-provider">Delete endpoint</button></div>
+      <div class="chat-actions"><label><input id="auto-voice" type="checkbox" checked> Generate voice for each reply</label><label>Delivery <select id="voice-delivery" style="margin-left:5px;padding:6px;border:1px solid var(--line);border-radius:7px;background:var(--paper);color:var(--ink)"><option value="note">Attach voice note</option><option value="direct">Direct playback (stream as generated)</option></select></label><label><input id="auto-play-note" type="checkbox" checked> Auto-play voice notes</label></div>
+      <p class="chat-note">Endpoints are saved in this browser. Requests go through this app's server proxy to avoid browser CORS restrictions. API keys are stored locally in your browser and sent only with requests to the endpoint you configure.</p>
     </details>
     <div class="chat-log" id="chat-log" aria-live="polite"><div class="chat-msg assistant">Prexzy AI Writer is ready. Send a message to begin.</div></div>
     <div class="chat-compose"><textarea id="chat-input" placeholder="Write a message…" aria-label="Message"></textarea><button type="button" id="chat-send">Send</button></div>
@@ -318,46 +322,28 @@ function chatMessage(role, text) {
   const el = document.createElement("div"); el.className = "chat-msg " + role; el.textContent = text;
   chatLog.append(el); chatLog.scrollTop = chatLog.scrollHeight; return el;
 }
-function providerSettings() {
-  return {
-    provider: $("provider-mode").value,
-    url:$("provider-url").value.trim().replace(/\/$/,""),
-    model:$("provider-model").value.trim(),
-    key:$("provider-key").value,
-    system:$("provider-system").value.trim() || "You are a helpful assistant."
-  };
-}
-function updateProviderFields() {
-  const custom=$("provider-mode").value==="custom";
-  $("custom-provider-fields").hidden=!custom;
-}
-function loadProviderSettings() {
-  try {
-    const s=JSON.parse(localStorage.getItem("tiny-voca-provider")||"{}");
-    $("provider-mode").value=s.provider==="custom"?"custom":"prexzy";
-    $("provider-url").value=s.url||"";
-    $("provider-model").value=s.model||"";
-    $("provider-key").value=s.key||"";
-    $("provider-system").value=s.system||"You are a helpful assistant.";
-  } catch(e) { $("provider-mode").value="prexzy"; }
-  updateProviderFields();
-}
-$("provider-mode").addEventListener("change",updateProviderFields);
-$("save-provider").onclick=()=>{
-  const s=providerSettings();
-  localStorage.setItem("tiny-voca-provider",JSON.stringify(s));
-  chatStatus.textContent=s.provider==="prexzy"?"Prexzy AI Writer saved as the default provider.":"Custom provider settings saved in this browser.";
-};
-$("clear-provider").onclick=()=>{
-  localStorage.removeItem("tiny-voca-provider");
-  $("provider-mode").value="prexzy";
-  $("provider-key").value=""; $("provider-url").value=""; $("provider-model").value="";
-  $("provider-system").value="You are a helpful assistant.";
-  updateProviderFields();
-  chatHistory=[];
-  chatStatus.textContent="Provider settings cleared. Prexzy AI Writer is now selected.";
-};
+const ENDPOINTS_KEY="tiny-voca-endpoints-v2", ACTIVE_ENDPOINT_KEY="tiny-voca-active-endpoint-v2";
+let endpointProfiles=[];
+function defaultEndpoint(){return {id:"prexzy-default",name:"Prexzy AI Writer",type:"prexzy",url:"https://prexzyapis.com/ai/aiwriter-chat",method:"GET",promptParam:"prompt",modelParam:"model",model:"",key:"",authMode:"bearer",timeout:90,context:12,system:"You are a helpful assistant."};}
+function currentEndpoint(){return endpointProfiles.find(x=>x.id===$("endpoint-select").value)||endpointProfiles[0]||defaultEndpoint();}
+function readEndpointForm(){const old=currentEndpoint();return {id:old.id,name:$("endpoint-name").value.trim()||"My endpoint",type:$("endpoint-type").value,url:$("endpoint-url").value.trim(),method:$("endpoint-method").value,promptParam:$("endpoint-prompt-param").value.trim()||"prompt",modelParam:$("endpoint-model-param").value.trim()||"model",model:$("endpoint-model").value.trim(),key:$("endpoint-key").value,authMode:$("endpoint-auth").value,timeout:Math.max(10,Math.min(180,Number($("endpoint-timeout").value)||90)),context:Math.max(2,Math.min(40,Number($("endpoint-context").value)||12)),system:$("provider-system").value.trim()||"You are a helpful assistant."};}
+function saveProfiles(){localStorage.setItem(ENDPOINTS_KEY,JSON.stringify(endpointProfiles));localStorage.setItem(ACTIVE_ENDPOINT_KEY,$("endpoint-select").value||endpointProfiles[0]?.id||"");}
+function renderEndpointList(selected){const select=$("endpoint-select");select.innerHTML="";for(const p of endpointProfiles){const o=document.createElement("option");o.value=p.id;o.textContent=p.name+(p.type==="prexzy"?" · prompt":" · OpenAI");select.append(o);}if(selected&&endpointProfiles.some(p=>p.id===selected))select.value=selected;else if(endpointProfiles.length)select.value=endpointProfiles[0].id;loadEndpointForm();}
+function loadEndpointForm(){const p=currentEndpoint();$("endpoint-name").value=p.name;$("endpoint-type").value=p.type;$("endpoint-url").value=p.url;$("endpoint-method").value=p.method||"GET";$("endpoint-prompt-param").value=p.promptParam||"prompt";$("endpoint-model-param").value=p.modelParam||"model";$("endpoint-model").value=p.model||"";$("endpoint-key").value=p.key||"";$("endpoint-auth").value=p.authMode||"bearer";$("endpoint-timeout").value=p.timeout||90;$("endpoint-context").value=p.context||12;$("provider-system").value=p.system||"You are a helpful assistant.";updateEndpointFields();}
+function updateEndpointFields(){const openai=$("endpoint-type").value==="openai";$("endpoint-method-wrap").hidden=openai;$("endpoint-prompt-wrap").hidden=openai;$("endpoint-model-param-wrap").hidden=openai;}
+function providerSettings(){return currentEndpoint();}
+function loadProviderSettings(){try{endpointProfiles=JSON.parse(localStorage.getItem(ENDPOINTS_KEY)||"null")||[];}catch(e){endpointProfiles=[];}if(!endpointProfiles.length){let legacy={};try{legacy=JSON.parse(localStorage.getItem("tiny-voca-provider")||"{}");}catch(e){}const d=defaultEndpoint();if(legacy.provider==="custom"){endpointProfiles=[{...d,id:"legacy-custom",name:"Previous custom provider",type:"openai",url:legacy.url||"",model:legacy.model||"",key:legacy.key||"",system:legacy.system||d.system}];}else endpointProfiles=[d];}const active=localStorage.getItem(ACTIVE_ENDPOINT_KEY);renderEndpointList(active&&endpointProfiles.some(p=>p.id===active)?active:endpointProfiles[0].id);}
+$("endpoint-select").addEventListener("change",()=>{saveProfiles();loadEndpointForm();});$("endpoint-type").addEventListener("change",updateEndpointFields);
+$("save-provider").onclick=()=>{const p=readEndpointForm();if(!p.url){chatStatus.textContent="Enter an endpoint URL first.";return;}try{const u=new URL(p.url);if(u.protocol!=="https:")throw Error();}catch(e){chatStatus.textContent="Enter a valid HTTPS endpoint URL.";return;}const i=endpointProfiles.findIndex(x=>x.id===p.id);if(i>=0)endpointProfiles[i]=p;else endpointProfiles.push(p);renderEndpointList(p.id);saveProfiles();chatStatus.textContent="Endpoint saved: "+p.name;};
+$("add-provider").onclick=()=>{const p=readEndpointForm();if(!p.url){chatStatus.textContent="Enter an endpoint URL first.";return;}p.id="ep-"+Date.now().toString(36)+Math.random().toString(36).slice(2,7);endpointProfiles.push(p);renderEndpointList(p.id);saveProfiles();chatStatus.textContent="New endpoint saved: "+p.name;};
+$("test-provider").onclick=async()=>{const p=readEndpointForm();if(!p.url||(p.type==="openai"&&!p.model)){chatStatus.textContent="Enter a valid endpoint URL and, for OpenAI-compatible APIs, a model.";return;}$("test-provider").disabled=true;const started=performance.now();chatStatus.textContent="Testing endpoint…";try{const result=await callAIEndpoint(p,[{role:"system",content:p.system||"You are a helpful assistant."},{role:"user",content:"Reply with exactly CONNECTION_OK."}]);chatStatus.textContent="Endpoint connected in "+((performance.now()-started)/1000).toFixed(2)+"s. Response: "+result.slice(0,140);}catch(e){chatStatus.textContent="Endpoint test failed: "+e.message;}finally{$("test-provider").disabled=false;}};
+$("delete-provider").onclick=()=>{if(endpointProfiles.length<=1){chatStatus.textContent="Keep at least one endpoint configured.";return;}const id=$("endpoint-select").value;endpointProfiles=endpointProfiles.filter(p=>p.id!==id);renderEndpointList();saveProfiles();chatStatus.textContent="Endpoint deleted.";};
 loadProviderSettings();
+async function callAIEndpoint(profile,messages){const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),profile.timeout*1000);const headers={Accept:"application/json"};if(profile.key){if(profile.authMode==="x-api-key")headers["x-api-key"]=profile.key;else headers.Authorization="Bearer "+profile.key;}let url,method,body;
+if(profile.type==="openai"){url=profile.url.replace(/\/+$/ ,"").replace(/\/chat\/completions$/ ,"")+"/chat/completions";method="POST";headers["Content-Type"]="application/json";body={model:profile.model,messages,stream:false,temperature:0.7};}else{url=profile.url;const payload={};payload[profile.promptParam||"prompt"]=messages.map(m=>(m.role==="system"?"System":m.role==="assistant"?"Assistant":"User")+":\n"+m.content).join("\n\n");if(profile.model)payload[profile.modelParam||"model"]=profile.model;method=profile.method||"GET";if(method==="GET"){const u=new URL(url);for(const [k,v] of Object.entries(payload))u.searchParams.set(k,v);url=u.toString();}else{headers["Content-Type"]="application/json";body=payload;}}
+const request={url,method,headers,body};
+try{let response;try{const directInit={method,headers,signal:controller.signal};if(body)directInit.body=JSON.stringify(body);response=await fetch(url,directInit);}catch(directError){if(directError.name==="AbortError")throw directError;response=await fetch("/api/ai",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(request),signal:controller.signal});}
+const raw=await response.text();let parsed;try{parsed=JSON.parse(raw);}catch(e){parsed={raw};}if(!response.ok)throw new Error(parsed.error?.message||parsed.error||parsed.message||("Request failed (HTTP "+response.status+")"));if(parsed.ok===false)throw new Error(parsed.error||("Endpoint returned HTTP "+parsed.upstreamStatus));const root=parsed.data!==undefined?parsed.data:parsed;let answer="";if(profile.type==="openai"){const c=root.choices?.[0]?.message?.content;answer=typeof c==="string"?c:Array.isArray(c)?c.map(x=>x.text||"").join("\n"):"";}else{const pick=(v,depth=0)=>{if(depth>7||v==null)return"";if(typeof v==="string")return v;if(Array.isArray(v)){for(const x of v){const z=pick(x,depth+1);if(z)return z;}return"";}if(typeof v==="object"){for(const k of ["result","response","reply","message","text","output","content","answer","completion","data"]){if(v[k]!==undefined){const z=pick(v[k],depth+1);if(z)return z;}}}return"";};answer=pick(root);}if(!answer.trim())throw new Error("Endpoint responded but no assistant text was found. Check its response JSON structure.");return answer.trim();}catch(e){if(e.name==="AbortError")throw new Error("Request timed out after "+profile.timeout+" seconds. Try a faster model or increase the timeout.");throw e;}finally{clearTimeout(timer);}}
 function chatWav(samples, sampleRate) { return URL.createObjectURL(wav(samples,sampleRate)); }
 worker.addEventListener("message",({data})=>{
   if(!data || !chatVoiceJobs.has(data.id)) return;
@@ -396,35 +382,9 @@ async function sendChat() {
   chatMessage("user",text); $("chat-input").value=""; chatHistory.push({role:"user",content:text});
   $("chat-send").disabled=true; chatStatus.textContent="Waiting for provider…";
   try {
-    let reply="";
-    if(s.provider==="prexzy") {
-      const transcript=chatHistory.map(m=>(m.role==="assistant"?"Assistant":"User")+": "+m.content).join("\n");
-      const prompt=(s.system?s.system+"\n\n":"")+transcript+"\nAssistant:";
-      const endpoint=new URL("https://prexzyapis.com/ai/aiwriter-chat");
-      endpoint.searchParams.set("prompt",prompt);
-      const response=await fetch(endpoint.toString(),{method:"GET",headers:{Accept:"application/json"}});
-      const body=await response.json().catch(()=>null);
-      if(!response.ok) throw new Error(body?.error?.message||body?.message||("Prexzy returned HTTP "+response.status));
-      const pick=(v)=>{
-        if(typeof v==="string") return v;
-        if(!v||typeof v!=="object") return "";
-        for(const k of ["result","response","reply","message","text","output","content","data"]) {
-          const got=pick(v[k]); if(got) return got;
-        }
-        return "";
-      };
-      reply=pick(body);
-      if(!reply.trim()) throw new Error(body?.error||"Prexzy returned no text. Check the API response or try the custom provider.");
-    } else {
-      if(!s.url || !s.model) throw new Error("Enter a custom API base URL and model, or switch back to Prexzy AI Writer.");
-      const headers={"Content-Type":"application/json"}; if(s.key) headers.Authorization="Bearer "+s.key;
-      const response=await fetch(s.url+"/chat/completions",{method:"POST",headers,body:JSON.stringify({model:s.model,messages:[{role:"system",content:s.system},...chatHistory],stream:false})});
-      const body=await response.json().catch(()=>({}));
-      if(!response.ok) throw new Error(body.error?.message||body.message||("Provider returned HTTP "+response.status));
-      const answer=body.choices?.[0]?.message?.content;
-      reply=typeof answer==="string"?answer:Array.isArray(answer)?answer.map(x=>x.text||"").join("\n"):"";
-      if(!reply.trim()) throw new Error("The custom provider returned an empty assistant message.");
-    }
+    const contextLimit=s.context||12;const messages=[{role:"system",content:s.system||"You are a helpful assistant."},...chatHistory.slice(-contextLimit)];
+    if(!s.url)throw new Error("This endpoint has no URL. Open Provider settings and configure it.");
+    let reply=await callAIEndpoint(s,messages);
     chatHistory.push({role:"assistant",content:reply});
     const message=chatMessage("assistant",reply);
     if($("auto-voice").checked) {
@@ -443,7 +403,7 @@ async function sendChat() {
         worker.postMessage({type:"speak",id,text:reply,voice:Number(document.querySelector('input[name="voice"]:checked').value),speed:Number($("speed").value)});
       }
     } else chatStatus.textContent="Reply received.";
-  } catch(error) { chatStatus.textContent="Chat error: "+error.message+". Check the base URL, model, key, and provider CORS settings."; if(voiceCallActive) finishVoiceTurn(); }
+  } catch(error) { chatStatus.textContent="Chat error: "+error.message+". Check the endpoint URL, request format, model, and key."; if(voiceCallActive) finishVoiceTurn(); }
   finally { $("chat-send").disabled=false; }
 }
 $("chat-send").onclick=sendChat;
@@ -471,7 +431,7 @@ function finishVoiceTurn(){voiceCallBusy=false;if(voiceCallActive&&!voiceCallMut
 function stopVoiceCall(){voiceCallActive=false;voiceCallBusy=false;voiceCallMuted=false;try{if(recognition)recognition.abort();}catch(e){}callStart.disabled=!recognitionSupported||!ready;callMute.disabled=true;callEnd.disabled=true;callMute.textContent="Mute microphone";callStatus("Voice call ended.",false);}
 callStart.disabled=!recognitionSupported||!ready;
 if(!recognitionSupported)callStatus("This browser does not support Web Speech recognition. Try Chrome on Android or desktop Chrome.",false);
-callStart.onclick=()=>{const settings=providerSettings();if(settings.provider==="custom"&&(!settings.url||!settings.model)){callStatus("Set your custom provider URL and model in Provider settings first.",false);return;}if(!ready){callStatus("Wait until Tiny-Voca shows Ready.",false);return;}voiceCallActive=true;voiceCallMuted=false;voiceCallBusy=false;callStart.disabled=true;callMute.disabled=false;callEnd.disabled=false;$("auto-voice").checked=true;callStatus("Starting voice call…");const Context=window.AudioContext||window.webkitAudioContext;if(Context&&!chatAudioContext){try{chatAudioContext=new Context({sampleRate:rate||24000});}catch(e){try{chatAudioContext=new Context();}catch(ignore){}}}if(chatAudioContext&&chatAudioContext.state==="suspended")chatAudioContext.resume().catch(()=>{});startListening();};
+callStart.onclick=()=>{const settings=providerSettings();if(!settings.url||(settings.type==="openai"&&!settings.model)){callStatus("Configure a valid endpoint and model (for OpenAI-compatible endpoints) in Provider settings first.",false);return;}if(!ready){callStatus("Wait until Tiny-Voca shows Ready.",false);return;}voiceCallActive=true;voiceCallMuted=false;voiceCallBusy=false;callStart.disabled=true;callMute.disabled=false;callEnd.disabled=false;$("auto-voice").checked=true;callStatus("Starting voice call…");const Context=window.AudioContext||window.webkitAudioContext;if(Context&&!chatAudioContext){try{chatAudioContext=new Context({sampleRate:rate||24000});}catch(e){try{chatAudioContext=new Context();}catch(ignore){}}}if(chatAudioContext&&chatAudioContext.state==="suspended")chatAudioContext.resume().catch(()=>{});startListening();};
 callMute.onclick=()=>{voiceCallMuted=!voiceCallMuted;if(voiceCallMuted){try{if(recognition)recognition.abort();}catch(e){}callMute.textContent="Unmute microphone";callStatus("Microphone muted. Tap unmute to continue.");}else{callMute.textContent="Mute microphone";startListening();}};
 callEnd.onclick=stopVoiceCall;
 $("call-language").onchange=()=>{if(voiceCallActive&&!voiceCallBusy&&!voiceCallMuted){try{if(recognition)recognition.abort();}catch(e){}startListening();}};
