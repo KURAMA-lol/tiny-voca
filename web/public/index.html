@@ -318,6 +318,11 @@ worker.postMessage({ type: "load" });
 const chatLog = $("chat-log"), chatStatus = $("chat-status");
 let chatHistory = [], chatVoiceJobs = new Map(), chatAudioContext = null;
 let voiceCallActive=false, voiceCallMuted=false, voiceCallBusy=false, recognition=null, recognitionSupported=false;
+// Suppress microphone recognition while assistant TTS is audible, then allow speaker echo to decay.
+let voiceOutputActive=false, voiceOutputCooldownUntil=0, voiceOutputReleaseTimer=null, listenRestartTimer=null;
+function setVoiceOutputActive(active,cooldown=900){if(voiceOutputReleaseTimer){clearTimeout(voiceOutputReleaseTimer);voiceOutputReleaseTimer=null;}voiceOutputActive=active;voiceOutputCooldownUntil=active?Number.POSITIVE_INFINITY:Date.now()+cooldown;}
+function scheduleListening(delay=250){if(listenRestartTimer)clearTimeout(listenRestartTimer);listenRestartTimer=setTimeout(()=>{listenRestartTimer=null;if(!voiceCallActive||voiceCallMuted||voiceCallBusy)return;if(voiceOutputActive||Date.now()<voiceOutputCooldownUntil){scheduleListening(250);return;}startListening();},delay);}
+function releaseVoiceOutputAfterPlayback(){if(voiceOutputReleaseTimer)clearTimeout(voiceOutputReleaseTimer);voiceOutputReleaseTimer=setTimeout(()=>{voiceOutputReleaseTimer=null;setVoiceOutputActive(false,900);if(voiceCallActive&&!voiceCallMuted&&!voiceCallBusy)scheduleListening(950);},250);}
 function chatMessage(role, text) {
   const el = document.createElement("div"); el.className = "chat-msg " + role; el.textContent = text;
   chatLog.append(el); chatLog.scrollTop = chatLog.scrollHeight; return el;
@@ -349,18 +354,21 @@ worker.addEventListener("message",({data})=>{
   if(!data || !chatVoiceJobs.has(data.id)) return;
   const job=chatVoiceJobs.get(data.id);
   if(data.type==="sentence" && job.mode==="direct" && data.audio && job.live) {
+    setVoiceOutputActive(true);
     job.live.add(data.audio,data.sampleRate);
     chatStatus.textContent="Playing reply…";
   } else if(data.type==="done") {
     chatVoiceJobs.delete(data.id);
     if(job.mode==="direct") {
       if(job.live) job.live.end();
+      if(!job.live || !job.live.playing) releaseVoiceOutputAfterPlayback();
       chatStatus.textContent="Reply playback finished.";
       if(job.onFinished) job.onFinished();
     } else {
       const audio=document.createElement("audio"); audio.controls=true; audio.preload="auto"; audio.src=chatWav(data.audio,data.sampleRate); audio.setAttribute("aria-label","AI reply voice note");
+      audio.onplay=()=>setVoiceOutputActive(true);audio.onended=()=>releaseVoiceOutputAfterPlayback();audio.onpause=()=>{if(!audio.ended)releaseVoiceOutputAfterPlayback();};
       job.append(audio);
-      if($("auto-play-note").checked) audio.play().then(()=>{chatStatus.textContent="Playing voice note…";}).catch(()=>{chatStatus.textContent="Voice note ready. Tap play if autoplay is blocked by your browser.";});
+      if($("auto-play-note").checked) audio.play().then(()=>{setVoiceOutputActive(true);chatStatus.textContent="Playing voice note…";}).catch(()=>{chatStatus.textContent="Voice note ready. Tap play if autoplay is blocked by your browser.";});
       else chatStatus.textContent="Voice note ready.";
       if(job.onFinished) job.onFinished();
     }
@@ -399,6 +407,7 @@ async function sendChat() {
           if(chatAudioContext.state==="suspended") chatAudioContext.resume().catch(()=>{});
         }
         chatVoiceJobs.set(id,{append:message,mode,live:livePlayerInstance,onFinished:voiceCallActive?finishVoiceTurn:null});
+        if(mode==="direct")setVoiceOutputActive(true);
         chatStatus.textContent=mode==="direct"?"Generating and playing reply…":"Generating voice note…";
         worker.postMessage({type:"speak",id,text:reply,voice:Number(document.querySelector('input[name="voice"]:checked').value),speed:Number($("speed").value)});
       }
@@ -423,12 +432,12 @@ function makeRecognition() {
     if(finalText.trim()&&voiceCallActive&&!voiceCallMuted){voiceCallBusy=true;try{r.stop();}catch(e){} $("chat-input").value=finalText.trim();chatStatus.textContent="Recognized: "+finalText.trim();sendChat();}
   };
   r.onerror=(event)=>{if(event.error==="not-allowed"||event.error==="service-not-allowed"){callStatus("Microphone permission denied. Allow microphone access in your browser.",false);stopVoiceCall();}else if(event.error!=="no-speech"&&event.error!=="aborted")callStatus("Speech recognition error: "+event.error);};
-  r.onend=()=>{if(voiceCallActive&&!voiceCallMuted&&!voiceCallBusy)setTimeout(()=>startListening(),350);};
+  r.onend=()=>{if(voiceCallActive&&!voiceCallMuted&&!voiceCallBusy)scheduleListening(350);};
   return r;
 }
-function startListening(){if(!voiceCallActive||voiceCallMuted||voiceCallBusy)return;try{recognition=makeRecognition();if(!recognition)return;recognition.start();callStatus("Listening… Speak naturally.");}catch(error){callStatus("Could not start microphone: "+error.message);}}
-function finishVoiceTurn(){voiceCallBusy=false;if(voiceCallActive&&!voiceCallMuted){callStatus("Reply finished. Listening again…");setTimeout(()=>startListening(),500);}}
-function stopVoiceCall(){voiceCallActive=false;voiceCallBusy=false;voiceCallMuted=false;try{if(recognition)recognition.abort();}catch(e){}callStart.disabled=!recognitionSupported||!ready;callMute.disabled=true;callEnd.disabled=true;callMute.textContent="Mute microphone";callStatus("Voice call ended.",false);}
+function startListening(){if(!voiceCallActive||voiceCallMuted||voiceCallBusy)return;if(voiceOutputActive||Date.now()<voiceOutputCooldownUntil){scheduleListening(250);return;}try{recognition=makeRecognition();if(!recognition)return;recognition.start();callStatus("Listening… Speak naturally.");}catch(error){callStatus("Could not start microphone: "+error.message);}}
+function finishVoiceTurn(){voiceCallBusy=false;if(voiceCallActive&&!voiceCallMuted){callStatus("Reply finished. Waiting for speaker echo to clear…");scheduleListening(950);}}
+function stopVoiceCall(){voiceCallActive=false;voiceCallBusy=false;voiceCallMuted=false;if(listenRestartTimer){clearTimeout(listenRestartTimer);listenRestartTimer=null;}if(voiceOutputReleaseTimer){clearTimeout(voiceOutputReleaseTimer);voiceOutputReleaseTimer=null;}voiceOutputActive=false;voiceOutputCooldownUntil=0;try{if(recognition)recognition.abort();}catch(e){}callStart.disabled=!recognitionSupported||!ready;callMute.disabled=true;callEnd.disabled=true;callMute.textContent="Mute microphone";callStatus("Voice call ended.",false);}
 callStart.disabled=!recognitionSupported||!ready;
 if(!recognitionSupported)callStatus("This browser does not support Web Speech recognition. Try Chrome on Android or desktop Chrome.",false);
 callStart.onclick=()=>{const settings=providerSettings();if(!settings.url||(settings.type==="openai"&&!settings.model)){callStatus("Configure a valid endpoint and model (for OpenAI-compatible endpoints) in Provider settings first.",false);return;}if(!ready){callStatus("Wait until Tiny-Voca shows Ready.",false);return;}voiceCallActive=true;voiceCallMuted=false;voiceCallBusy=false;callStart.disabled=true;callMute.disabled=false;callEnd.disabled=false;$("auto-voice").checked=true;callStatus("Starting voice call…");const Context=window.AudioContext||window.webkitAudioContext;if(Context&&!chatAudioContext){try{chatAudioContext=new Context({sampleRate:rate||24000});}catch(e){try{chatAudioContext=new Context();}catch(ignore){}}}if(chatAudioContext&&chatAudioContext.state==="suspended")chatAudioContext.resume().catch(()=>{});startListening();};
