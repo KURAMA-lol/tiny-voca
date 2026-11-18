@@ -1,0 +1,4 @@
+{
+  "buildCommand": "git clone --depth 1 https://github.com/n4ze3m/dizione /tmp/dizione && bash fetch_assets.sh /tmp/dizione",
+  "outputDirectory": "public"
+}

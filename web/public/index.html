@@ -69,6 +69,27 @@
     dl { grid-template-columns: repeat(2, 1fr); } .facts { grid-template-columns: repeat(2, 1fr); }
     #speak { margin-left: 0; width: 100%; }
   }
+
+  .chat-panel { margin-top: 36px; border: 1px solid var(--line); border-radius: 14px; padding: 18px; background: var(--panel); }
+  .chat-panel h2 { margin: 0 0 6px; font: 600 25px var(--sans); }
+  .chat-note { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
+  .provider-grid { display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin:12px 0; }
+  .provider-grid label { display:flex; flex-direction:column; gap:5px; color:var(--muted); font-size:12px; }
+  .provider-grid input { min-width:0; border:1px solid var(--line); border-radius:8px; padding:10px; background:var(--paper); color:var(--ink); font:14px var(--ui); }
+  .chat-log { display:flex; flex-direction:column; gap:12px; min-height:150px; max-height:420px; overflow:auto; padding:12px 0; }
+  .chat-msg { max-width:90%; padding:11px 13px; border-radius:12px; white-space:pre-wrap; overflow-wrap:anywhere; font-size:14px; }
+  .chat-msg.user { align-self:flex-end; background:var(--accent); color:var(--accent-ink); }
+  .chat-msg.assistant { align-self:flex-start; background:var(--paper); border:1px solid var(--line); }
+  .chat-msg audio { display:block; width:min(320px,75vw); margin-top:9px; }
+  .chat-compose { display:flex; gap:9px; align-items:stretch; border-top:1px solid var(--line); padding-top:12px; }
+  .chat-compose textarea { min-height:66px; flex:1; border:1px solid var(--line); border-radius:9px; padding:10px; background:var(--paper); color:var(--ink); font:15px var(--ui); }
+  .chat-compose button,.chat-actions button { border:0; border-radius:9px; padding:10px 16px; background:var(--accent); color:var(--accent-ink); font-weight:600; cursor:pointer; }
+  .chat-actions { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-top:10px; }
+  .chat-actions label { color:var(--muted); font-size:13px; }
+  .chat-actions button.secondary { background:transparent; border:1px solid var(--line); color:var(--ink); }
+  #chat-status { color:var(--muted); font-size:13px; margin-top:9px; min-height:20px; }
+  @media(max-width:560px){ .provider-grid{grid-template-columns:1fr} .chat-compose{flex-direction:column} .chat-compose button{min-height:44px} }
+
 </style>
 </head>
 <body>
@@ -104,6 +125,26 @@
       <div><dt>Text to phonemes</dt><dd id="m-phonemes">–</dd></div>
     </dl>
     <details><summary>Phonemes</summary><pre id="phonemes"></pre></details>
+  </section>
+
+
+  <section class="chat-panel" id="ai-chat">
+    <h2>AI voice chat</h2>
+    <p class="chat-note">Connect any OpenAI-compatible chat endpoint. Replies are converted to tiny-voca voice notes locally in this browser.</p>
+    <details open>
+      <summary>Provider settings</summary>
+      <div class="provider-grid">
+        <label>API base URL<input id="provider-url" type="url" placeholder="https://api.openai.com/v1" autocomplete="url"></label>
+        <label>Model<input id="provider-model" type="text" placeholder="gpt-4o-mini" autocomplete="off"></label>
+        <label>API key (optional for keyless providers)<input id="provider-key" type="password" placeholder="API key" autocomplete="off"></label>
+        <label>System prompt<input id="provider-system" type="text" value="You are a helpful assistant." autocomplete="off"></label>
+      </div>
+      <div class="chat-actions"><button type="button" id="save-provider">Save provider settings</button><button type="button" class="secondary" id="clear-provider">Clear saved settings</button><label><input id="auto-voice" type="checkbox" checked> Generate a voice note for each reply</label></div>
+      <p class="chat-note">Settings are saved in this browser only. Your API key is sent directly to the provider, not to this website. The provider must allow browser CORS requests.</p>
+    </details>
+    <div class="chat-log" id="chat-log" aria-live="polite"><div class="chat-msg assistant">Connect your provider, then send a message.</div></div>
+    <div class="chat-compose"><textarea id="chat-input" placeholder="Write a message…" aria-label="Message"></textarea><button type="button" id="chat-send">Send</button></div>
+    <div id="chat-status" role="status"></div>
   </section>
 
   <section class="facts">
@@ -233,6 +274,60 @@ $("text").addEventListener("keydown", (event) => {
 
 setStatus("Loading the model and the phonemizer…");
 worker.postMessage({ type: "load" });
+
+// OpenAI-compatible chat. Provider credentials stay in this browser and are never sent to this app's server.
+const chatLog = $("chat-log"), chatStatus = $("chat-status");
+let chatHistory = [], chatVoiceJobs = new Map();
+function chatMessage(role, text) {
+  const el = document.createElement("div"); el.className = "chat-msg " + role; el.textContent = text;
+  chatLog.append(el); chatLog.scrollTop = chatLog.scrollHeight; return el;
+}
+function providerSettings() { return { url:$("provider-url").value.trim().replace(/\/$/,""), model:$("provider-model").value.trim(), key:$("provider-key").value, system:$("provider-system").value.trim() || "You are a helpful assistant." }; }
+function loadProviderSettings() {
+  try { const s=JSON.parse(localStorage.getItem("tiny-voca-provider")||"{}"); $("provider-url").value=s.url||""; $("provider-model").value=s.model||""; $("provider-key").value=s.key||""; $("provider-system").value=s.system||"You are a helpful assistant."; } catch(e) {}
+}
+$("save-provider").onclick=()=>{ const s=providerSettings(); localStorage.setItem("tiny-voca-provider",JSON.stringify(s)); chatStatus.textContent="Provider settings saved in this browser."; };
+$("clear-provider").onclick=()=>{ localStorage.removeItem("tiny-voca-provider"); $("provider-key").value=""; $("provider-url").value=""; $("provider-model").value=""; chatStatus.textContent="Saved provider settings cleared."; };
+loadProviderSettings();
+function chatWav(samples, sampleRate) { return URL.createObjectURL(wav(samples,sampleRate)); }
+worker.addEventListener("message",({data})=>{
+  if(!data || !chatVoiceJobs.has(data.id)) return;
+  if(data.type==="done") {
+    const job=chatVoiceJobs.get(data.id); chatVoiceJobs.delete(data.id);
+    const audio=document.createElement("audio"); audio.controls=true; audio.preload="none"; audio.src=chatWav(data.audio,data.sampleRate); audio.setAttribute("aria-label","AI reply voice note");
+    job.append(audio); chatStatus.textContent="Voice note ready.";
+  } else if(data.type==="error") { chatVoiceJobs.delete(data.id); chatStatus.textContent="Voice generation failed: "+data.message; }
+});
+async function sendChat() {
+  const text=$("chat-input").value.trim(); if(!text) return;
+  const s=providerSettings();
+  if(!s.url || !s.model) { chatStatus.textContent="Enter an API base URL and model first."; return; }
+  chatMessage("user",text); $("chat-input").value=""; chatHistory.push({role:"user",content:text});
+  $("chat-send").disabled=true; chatStatus.textContent="Waiting for provider…";
+  try {
+    const headers={"Content-Type":"application/json"}; if(s.key) headers.Authorization="Bearer "+s.key;
+    const response=await fetch(s.url+"/chat/completions",{method:"POST",headers,body:JSON.stringify({model:s.model,messages:[{role:"system",content:s.system},...chatHistory],stream:false})});
+    const body=await response.json().catch(()=>({}));
+    if(!response.ok) throw new Error(body.error?.message||body.message||("Provider returned HTTP "+response.status));
+    const answer=body.choices?.[0]?.message?.content;
+    const reply=typeof answer==="string"?answer:Array.isArray(answer)?answer.map(x=>x.text||"").join("\n"):"";
+    if(!reply.trim()) throw new Error("The provider returned an empty assistant message.");
+    chatHistory.push({role:"assistant",content:reply});
+    const message=chatMessage("assistant",reply);
+    if($("auto-voice").checked) {
+      if(!ready) { chatStatus.textContent="Reply received, but tiny-voca is still loading. Wait for the TTS status to show Ready, then resend or use the TTS section."; }
+      else {
+        const id="chat-"+Date.now()+"-"+Math.random().toString(36).slice(2);
+        chatVoiceJobs.set(id,message); chatStatus.textContent="Generating voice note…";
+        worker.postMessage({type:"speak",id,text:reply,voice:Number(document.querySelector('input[name="voice"]:checked').value),speed:Number($("speed").value)});
+      }
+    } else chatStatus.textContent="Reply received.";
+  } catch(error) { chatStatus.textContent="Chat error: "+error.message+". Check the base URL, model, key, and provider CORS settings."; }
+  finally { $("chat-send").disabled=false; }
+}
+$("chat-send").onclick=sendChat;
+$("chat-input").addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendChat();}});
+
 </script>
 </body>
 </html>
