@@ -244,7 +244,7 @@ function wav(samples, rate) {
 let phonemes = [];
 worker.onmessage = ({ data }) => {
   if (data.type === "status") setStatus(data.text, data.progress);
-  else if (data.type === "ready") { ready = true; rate = data.sampleRate; setStatus("Ready."); update(); }
+  else if (data.type === "ready") { ready = true; rate = data.sampleRate; setStatus("Ready."); update(); if (window.SpeechRecognition || window.webkitSpeechRecognition) { const callButton = document.getElementById("call-start"); if (callButton) callButton.disabled = false; } }
   else if (data.type === "sentence" && data.id === request) {
     phonemes.push(data.phonemes);
     if (live && data.audio) live.add(data.audio, data.sampleRate);
