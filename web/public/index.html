@@ -541,7 +541,17 @@ let pendingCallText="", callSilenceTimer=null, callRestartTimer=null;
 function callStatus(message, active=voiceCallActive){callState.innerHTML='<span class="call-live '+(active?'active':'')+'"></span>'+message;}
 function scheduleCallListening(delay=250){
   if(callRestartTimer)clearTimeout(callRestartTimer);
-  callRestartTimer=setTimeout(()=>{callRestartTimer=null;if(voiceCallActive&&!voiceCallMuted&&!voiceCallBusy&&!voiceOutputActive&&!activeCallVoiceJob&&Date.now()>=voiceOutputCooldownUntil)startListening();},delay);
+  callRestartTimer=setTimeout(()=>{
+    callRestartTimer=null;
+    if(!voiceCallActive||voiceCallMuted||voiceCallBusy)return;
+    // Keep retrying until the post-TTS echo cooldown has actually expired.
+    if(voiceOutputActive||activeCallVoiceJob||Date.now()<voiceOutputCooldownUntil){
+      const remaining=voiceOutputCooldownUntil-Date.now();
+      scheduleCallListening(voiceOutputActive||activeCallVoiceJob?300:Math.max(120,Math.min(300,remaining+40)));
+      return;
+    }
+    startListening();
+  },delay);
 }
 function commitCallSpeech(){
   if(callSilenceTimer){clearTimeout(callSilenceTimer);callSilenceTimer=null;}
